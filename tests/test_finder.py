@@ -176,3 +176,33 @@ def test_rate_limit(mock_api):
     }
     result = rate_limit()
     assert result["resources"]["core"]["limit"] == 5000
+
+
+def test_output_file_flag(tmp_path):
+    """Test writing output directly to a file using --output."""
+    import argparse
+    from unittest.mock import patch
+
+    out_file = tmp_path / "output.md"
+    sample_items = [
+        {
+            "html_url": "https://github.com/foo/bar/issues/1",
+            "title": "Fix issue",
+            "labels": [{"name": "bug"}],
+            "repository_url": "https://api.github.com/repos/foo/bar",
+            "_stars": 42,
+            "_lang": "Python",
+        }
+    ]
+
+    test_args = ["oss_finder", "--format", "markdown", "-o", str(out_file)]
+    with patch("sys.argv", test_args):
+        with patch("oss_contribution_finder.get_token", return_value=None):
+            with patch("oss_contribution_finder.search_issues", return_value={"items": sample_items}):
+                import oss_contribution_finder
+                oss_contribution_finder.main()
+
+    assert out_file.exists()
+    content = out_file.read_text(encoding="utf-8")
+    assert "Fix issue" in content
+    assert "foo/bar" in content

@@ -250,7 +250,13 @@ Examples:
         choices=["table", "markdown", "json"],
         default="table",
         help="Output format (default: table)",
+    )    parser.add_argument(
+        "--output",
+        "-o",
+        dest="output_file",
+        help="Write output to a file instead of stdout",
     )
+
     parser.add_argument(
         "--no-enrich",
         action="store_true",
@@ -307,7 +313,13 @@ Examples:
         "json": format_json,
     }
     output = formatters[args.format](items)
-    print(output)
+    if getattr(args, "output_file", None):
+        with open(args.output_file, "w", encoding="utf-8") as f:
+            f.write(output)
+            if not output.endswith("\n"):
+                f.write("\n")
+    else:
+        print(output)
 
 
 if __name__ == "__main__":
