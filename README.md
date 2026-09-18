@@ -46,6 +46,13 @@ oss-contribution-finder --check-rate-limit
 | `--sort` | Sort field (`comments`, `reactions`, `updated`) | `updated` |
 | `--limit`, `-n` | Max results | 20 |
 | `--format`, `-f` | Output (`table`, `markdown`, `json`) | `table` |
+| `--output`, `-o` | Write output to a file instead of stdout | — |
+| `--watch` | Enable continuous monitoring mode | false |
+| `--interval` | Polling interval in seconds for watch mode | 3600 |
+| `--digest` | Digest mode: exits 1 if new issues found | false |
+| `--state-file` | Path to state file tracking seen issues | `.oss-contribution-finder.json` |
+| `--retry` | Max retries with exponential backoff on 403/429 | 3 |
+| `--no-cache` | Disable local request caching | false |
 | `--no-enrich` | Skip repo metadata (faster) | false |
 | `--check-rate-limit` | Show rate limit and exit | — |
 
@@ -67,6 +74,12 @@ oss-contribution-finder --label "good first issue" --label "documentation" --lim
 
 # Find recently updated Python issues in AI/ML
 oss-contribution-finder --language python --topic machine-learning --updated-after 2026-08-01
+
+# Continuous monitoring with 30m intervals
+oss-contribution-finder --label bounty --watch --interval 1800
+
+# CI / Cron digest mode (exits 1 if new issues detected)
+oss-contribution-finder --language python --digest -o new-issues.md
 
 # Generate a weekly digest
 oss-contribution-finder --language rust --format markdown --limit 25 > weekly-opportunities.md

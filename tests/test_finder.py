@@ -237,3 +237,29 @@ def test_api_request_retry_on_rate_limit(mock_urlopen):
         res = api_request("https://api.github.com/rate-limited-endpoint", retries=2, use_cache=False)
         assert res == {"success": True}
         assert mock_sleep.called
+
+
+def test_load_and_save_seen_ids(tmp_path):
+    from oss_contribution_finder import load_seen_ids, save_seen_ids
+
+    state_file = tmp_path / "state.json"
+    assert load_seen_ids(state_file) == set()
+
+    save_seen_ids({101, 102, 103}, state_file)
+    assert load_seen_ids(state_file) == {101, 102, 103}
+
+
+def test_filter_new_opportunities():
+    from oss_contribution_finder import filter_new_opportunities
+
+    seen = {1, 2}
+    items = [
+        {"id": 1, "title": "Old 1"},
+        {"id": 3, "title": "New 3"},
+        {"id": 2, "title": "Old 2"},
+        {"id": 4, "title": "New 4"},
+    ]
+    new_opps, updated_seen = filter_new_opportunities(items, seen)
+    assert len(new_opps) == 2
+    assert [x["id"] for x in new_opps] == [3, 4]
+    assert updated_seen == {1, 2, 3, 4}

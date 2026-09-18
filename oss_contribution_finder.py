@@ -18,6 +18,7 @@ import json
 import os
 import sys
 import time
+from pathlib import Path
 import urllib.request
 import urllib.parse
 import urllib.error
@@ -257,6 +258,41 @@ def enrich_opportunities(
     return enriched
 
 
+
+STATE_FILE = Path(".oss-contribution-finder.json")
+
+
+def load_seen_ids(state_path: Path = STATE_FILE) -> set:
+    if state_path.exists():
+        try:
+            with open(state_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                return set(data) if isinstance(data, list) else set()
+        except Exception:
+            return set()
+    return set()
+
+
+def save_seen_ids(seen_ids: set, state_path: Path = STATE_FILE) -> None:
+    try:
+        with open(state_path, "w", encoding="utf-8") as f:
+            json.dump(sorted(list(seen_ids)), f, indent=2)
+    except Exception as e:
+        print(f"Warning: could not save state file: {e}", file=sys.stderr)
+
+
+def filter_new_opportunities(items: list[dict], seen_ids: set) -> tuple[list[dict], set]:
+    new_items = []
+    updated_seen = set(seen_ids)
+    for item in items:
+        item_id = item.get("id")
+        if item_id and item_id not in updated_seen:
+            new_items.append(item)
+            updated_seen.add(item_id)
+        elif not item_id:
+            new_items.append(item)
+    return new_items, updated_seen
+
 def main():
     parser = argparse.ArgumentParser(
         description="Find OSS contribution opportunities",
@@ -313,6 +349,27 @@ Examples:
         help="Skip fetching repo metadata (faster, less info)",
     )
     parser.add_argument(
+        "--watch",
+        action="store_true",
+        help="Enable continuous monitoring mode",
+    )
+    parser.add_argument(
+        "--interval",
+        type=int,
+        default=3600,
+        help="Check interval in seconds for watch mode",
+    )
+    parser.add_argument(
+        "--digest",
+        action="store_true",
+        help="Digest mode: runs once, tracks state file, exits 1 if new issues found, 0 otherwise",
+    )
+    parser.add_argument(
+        "--state-file",
+        default=".oss-contribution-finder.json",
+        help="Custom path to the seen issues state file",
+    )
+    parser.add_argument(
         "--check-rate-limit",
         action="store_true",
         help="Check rate limit and exit",
@@ -364,19 +421,82 @@ Examples:
         print(f"Error: {msg}", file=sys.stderr)
         sys.exit(1)
 
-    items = result.get("items", [])
-
-    # Enrich with repo metadata
-    if not args.no_enrich and token:
-        items = enrich_opportunities(items, token=token, max_repos=args.limit)
-
-    # Format output
+    state_path = Path(args.state_file)
     formatters = {
         "table": format_table,
         "markdown": format_markdown,
         "json": format_json,
     }
-    output = formatters[args.format](items)
+
+    def run_cycle(seen_set: set):
+        res = search_issues(
+            labels=args.label,
+            language=args.language,
+            topic=args.topic,
+            min_stars=args.min_stars,
+            created_after=args.created_after,
+            updated_after=args.updated_after,
+            sort=args.sort,
+            per_page=per_page,
+            token=token,
+            retries=args.retry,
+            use_cache=not args.no_cache,
+        )
+        if "error" in res:
+            msg = res.get("message") or str(res)
+            print(f"Error: {msg}", file=sys.stderr)
+            return [], seen_set
+
+        raw_items = res.get("items", [])
+        if args.watch or args.digest:
+            new_opps, seen_set = filter_new_opportunities(raw_items, seen_set)
+        else:
+            new_opps = raw_items
+
+        if not args.no_enrich and token and new_opps:
+            new_opps = enrich_opportunities(new_opps, token=token, max_repos=args.limit)
+
+        return new_opps, seen_set
+
+    seen = load_seen_ids(state_path) if (args.watch or args.digest) else set()
+
+    if args.watch:
+        print(f"Starting watch mode (interval: {args.interval}s, state: {state_path}). Press Ctrl+C to exit.")
+        try:
+            while True:
+                new_items, seen = run_cycle(seen)
+                if new_items:
+                    save_seen_ids(seen, state_path)
+                    output = formatters[args.format](new_items)
+                    if getattr(args, "output_file", None):
+                        with open(args.output_file, "a", encoding="utf-8") as f:
+                            f.write(f"\n# Batch at {datetime.now(timezone.utc).isoformat()}\n" + output + "\n")
+                    print(f"[{datetime.now(timezone.utc).strftime('%H:%M:%S')}] Found {len(new_items)} new opportunities:")
+                    print(output)
+                else:
+                    print(f"[{datetime.now(timezone.utc).strftime('%H:%M:%S')}] No new opportunities found.")
+                time.sleep(args.interval)
+        except KeyboardInterrupt:
+            print("\nExiting watch mode.")
+            return
+
+    new_items, seen = run_cycle(seen)
+
+    if args.digest:
+        if new_items:
+            save_seen_ids(seen, state_path)
+            output = formatters[args.format](new_items)
+            if getattr(args, "output_file", None):
+                with open(args.output_file, "w", encoding="utf-8") as f:
+                    f.write(output + "\n")
+            else:
+                print(output)
+            sys.exit(1)
+        else:
+            print("No new opportunities found.")
+            sys.exit(0)
+
+    output = formatters[args.format](new_items)
     if getattr(args, "output_file", None):
         with open(args.output_file, "w", encoding="utf-8") as f:
             f.write(output)
