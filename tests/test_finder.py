@@ -206,3 +206,34 @@ def test_output_file_flag(tmp_path):
     content = out_file.read_text(encoding="utf-8")
     assert "Fix issue" in content
     assert "foo/bar" in content
+
+
+def test_api_request_caching():
+    from oss_contribution_finder import api_request, _API_CACHE
+    _API_CACHE.clear()
+    test_url = "https://api.github.com/test-endpoint"
+    _API_CACHE[test_url] = {"cached": True}
+    res = api_request(test_url, use_cache=True)
+    assert res == {"cached": True}
+    _API_CACHE.clear()
+
+
+@patch("urllib.request.urlopen")
+def test_api_request_retry_on_rate_limit(mock_urlopen):
+    import urllib.error
+    from oss_contribution_finder import api_request, _API_CACHE
+    _API_CACHE.clear()
+
+    mock_resp = MagicMock()
+    mock_resp.__enter__.return_value.read.return_value = b'{"success": true}'
+
+    fp = MagicMock()
+    fp.read.return_value = b'rate limit exceeded'
+    err = urllib.error.HTTPError("url", 429, "Too Many Requests", {}, fp)
+
+    mock_urlopen.side_effect = [err, mock_resp]
+
+    with patch("time.sleep") as mock_sleep:
+        res = api_request("https://api.github.com/rate-limited-endpoint", retries=2, use_cache=False)
+        assert res == {"success": True}
+        assert mock_sleep.called

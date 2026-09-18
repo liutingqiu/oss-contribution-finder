@@ -17,10 +17,15 @@ import argparse
 import json
 import os
 import sys
+import time
 import urllib.request
 import urllib.parse
+import urllib.error
 from datetime import datetime, timedelta, timezone
 from typing import Any
+
+# Simple in-memory response cache to reduce duplicate API calls
+_API_CACHE: dict[str, Any] = {}
 
 
 GITHUB_API = "https://api.github.com"
@@ -32,8 +37,16 @@ def get_token() -> str | None:
     return os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN")
 
 
-def api_request(url: str, token: str | None = None) -> dict | list:
-    """Make an authenticated API request."""
+def api_request(
+    url: str,
+    token: str | None = None,
+    retries: int = 3,
+    use_cache: bool = True,
+) -> dict | list:
+    """Make an authenticated API request with rate limit handling, retry, and caching."""
+    if use_cache and url in _API_CACHE:
+        return _API_CACHE[url]
+
     headers = {
         "Accept": "application/vnd.github+json",
         "X-GitHub-Api-Version": "2022-11-28",
@@ -41,15 +54,49 @@ def api_request(url: str, token: str | None = None) -> dict | list:
     if token:
         headers["Authorization"] = f"Bearer {token}"
 
-    req = urllib.request.Request(url, headers=headers)
-    try:
-        with urllib.request.urlopen(req, timeout=30) as resp:
-            return json.loads(resp.read())
-    except urllib.error.HTTPError as e:
-        body = e.read().decode() if e.fp else ""
-        return {"error": e.code, "message": body}
-    except Exception as e:
-        return {"error": str(e)}
+    for attempt in range(max(1, retries)):
+        req = urllib.request.Request(url, headers=headers)
+        try:
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                data = json.loads(resp.read())
+                if use_cache:
+                    _API_CACHE[url] = data
+                return data
+        except urllib.error.HTTPError as e:
+            raw_body = e.read().decode(errors="ignore") if e.fp else ""
+            # Check for primary or secondary rate limit (403 or 429)
+            is_rate_limit = (
+                e.code == 429
+                or (e.code == 403 and any(k in raw_body.lower() for k in ["rate limit", "rate-limit", "secondary rate"]))
+            )
+
+            if is_rate_limit:
+                reset_header = e.headers.get("X-RateLimit-Reset") if hasattr(e, "headers") and e.headers else None
+                if reset_header and str(reset_header).isdigit():
+                    wait_seconds = max(1.0, float(reset_header) - time.time())
+                else:
+                    wait_seconds = float(2 ** attempt)
+
+                sleep_time = min(wait_seconds, 60.0)
+
+                if attempt < retries - 1:
+                    time.sleep(sleep_time)
+                    continue
+
+                return {
+                    "error": e.code,
+                    "rate_limited": True,
+                    "message": f"GitHub API rate limit exceeded (HTTP {e.code}). Reset in {int(wait_seconds)}s. Use a GitHub token with GH_TOKEN to increase limits.",
+                }
+
+            return {"error": e.code, "message": raw_body}
+        except Exception as e:
+            if attempt < retries - 1:
+                time.sleep(float(2 ** attempt))
+                continue
+            return {"error": str(e)}
+
+    return {"error": "Max retries exceeded"}
 
 
 def search_issues(
@@ -65,6 +112,8 @@ def search_issues(
     per_page: int = 30,
     page: int = 1,
     token: str | None = None,
+    retries: int = 3,
+    use_cache: bool = True,
 ) -> dict:
     """Search GitHub issues with filters."""
     query_parts = ["state:open", "is:issue"]
@@ -90,7 +139,7 @@ def search_issues(
         f"&per_page={per_page}&page={page}"
     )
     url = f"{SEARCH_ENDPOINT}?{params}"
-    return api_request(url, token=token)
+    return api_request(url, token=token, retries=retries, use_cache=use_cache)
 
 
 def get_repo_info(full_name: str, token: str | None = None) -> dict:
@@ -250,7 +299,8 @@ Examples:
         choices=["table", "markdown", "json"],
         default="table",
         help="Output format (default: table)",
-    )    parser.add_argument(
+    )
+    parser.add_argument(
         "--output",
         "-o",
         dest="output_file",
@@ -266,6 +316,17 @@ Examples:
         "--check-rate-limit",
         action="store_true",
         help="Check rate limit and exit",
+    )
+    parser.add_argument(
+        "--retry",
+        type=int,
+        default=3,
+        help="Maximum retry attempts on rate limit or network error (default: 3)",
+    )
+    parser.add_argument(
+        "--no-cache",
+        action="store_true",
+        help="Disable response caching for API requests",
     )
 
     args = parser.parse_args()
@@ -294,10 +355,13 @@ Examples:
         sort=args.sort,
         per_page=per_page,
         token=token,
+        retries=args.retry,
+        use_cache=not args.no_cache,
     )
 
     if "error" in result:
-        print(f"Error: {result}", file=sys.stderr)
+        msg = result.get("message") or str(result)
+        print(f"Error: {msg}", file=sys.stderr)
         sys.exit(1)
 
     items = result.get("items", [])
